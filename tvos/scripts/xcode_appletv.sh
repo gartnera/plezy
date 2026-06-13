@@ -150,6 +150,24 @@ ResolveEngineOutput() {
   return 1
 }
 
+# cupertino_http (via objective_c) ships native-asset build hooks, which force
+# Flutter's dart_build step to run during `flutter build bundle` and refuse to
+# be disabled. We build the bundle with --target-platform=darwin so those hooks
+# compile via xcrun (no Android SDK, and macOS needs no SdkRoot define that the
+# standalone `build bundle` command can't supply). The resulting macOS dylib +
+# manifest are useless on tvOS — the app short-circuits to a plain IOClient on
+# tvOS and never calls CupertinoClient (see lib/utils/platform_http_client_io.dart,
+# guarded by the TVOS_BUILD define). Strip the native-asset artifacts so the
+# tvOS engine never tries to load a wrong-platform binary.
+StripNativeAssets() {
+  local assets_dir="$1"
+  # Remove both the manifest and the installed code-asset frameworks/dylibs.
+  # The darwin build installs objective_c.framework as a deep (macOS) bundle,
+  # which tvOS rejects (it requires shallow frameworks) — and it's unused here.
+  rm -f "$assets_dir/NativeAssetsManifest.json"
+  rm -rf "$assets_dir/native_assets"
+}
+
 BuildAppDebug() {
   # Host tools (frontend_server, patched SDK, dartaotruntime) ship in
   # host_release for both debug and release consumers — the frontend_server
@@ -204,6 +222,7 @@ BuildAppDebug() {
   (
     cd "$FLUTTER_APPLICATION_PATH" && \
     "$FLUTTER_BIN" build bundle \
+      --target-platform=darwin \
       --asset-dir="$OUTDIR/App.framework/flutter_assets" \
       --no-tree-shake-icons \
       --suppress-analytics
@@ -211,6 +230,7 @@ BuildAppDebug() {
     echo " └─ERROR: flutter build bundle failed"
     return 1
   }
+  StripNativeAssets "$OUTDIR/App.framework/flutter_assets"
 
   echo " └─Compiling tvOS kernel via local engine frontend_server"
   FRONTEND_SERVER="$HOST_TOOLS/dart-sdk/bin/snapshots/frontend_server_aot.dart.snapshot"
@@ -364,6 +384,7 @@ BuildAppRelease() {
     cd "$FLUTTER_APPLICATION_PATH" && \
     "$FLUTTER_BIN" build bundle \
       --release \
+      --target-platform=darwin \
       --asset-dir="$OUTDIR/App.framework/flutter_assets" \
       --no-tree-shake-icons \
       --suppress-analytics
@@ -371,6 +392,7 @@ BuildAppRelease() {
     echo " └─ERROR: flutter build bundle failed"
     return 1
   }
+  StripNativeAssets "$OUTDIR/App.framework/flutter_assets"
   # AOT builds don't need kernel_blob.bin in flutter_assets — the compiled
   # arm64 code lives in App.framework/App itself.
   rm -f "$OUTDIR/App.framework/flutter_assets/kernel_blob.bin"
