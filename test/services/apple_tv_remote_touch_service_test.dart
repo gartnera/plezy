@@ -6,17 +6,43 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('AppleTvRemoteTouchService', () {
-    test('emits repeated horizontal swipes only after the repeat interval', () async {
+    test('a fast continuous flick emits repeated swipes', () async {
       final harness = _Harness();
 
+      // No time advances between moves → each segment is covered instantly →
+      // high velocity → a flick coasts across several items.
       await harness.send('started', x: 500, y: 500);
       await harness.send('move', x: 380, y: 490);
       await harness.send('move', x: 260, y: 490);
 
+      expect(harness.keys, [LogicalKeyboardKey.arrowLeft, LogicalKeyboardKey.arrowLeft]);
+    });
+
+    test('a slow drag moves focus only once regardless of distance', () async {
+      final harness = _Harness();
+
+      await harness.send('started', x: 500, y: 500);
+      await harness.send('move', x: 380, y: 500); // first move always fires
+
+      // 120 points over 400ms ≈ 300 pts/s, well below the flick threshold.
+      harness.advance(const Duration(milliseconds: 400));
+      await harness.send('move', x: 260, y: 500);
+
+      expect(harness.keys, [LogicalKeyboardKey.arrowLeft]);
+    });
+
+    test('a fast flick after a slow segment still moves focus', () async {
+      final harness = _Harness();
+
+      await harness.send('started', x: 500, y: 500);
+      await harness.send('move', x: 380, y: 500); // first emit
+
+      harness.advance(const Duration(milliseconds: 400));
+      await harness.send('move', x: 260, y: 500); // slow → suppressed, re-anchors
+
       expect(harness.keys, [LogicalKeyboardKey.arrowLeft]);
 
-      harness.advance(const Duration(milliseconds: 141));
-      await harness.send('move', x: 260, y: 490);
+      await harness.send('move', x: 140, y: 500); // instant → fast → emits
 
       expect(harness.keys, [LogicalKeyboardKey.arrowLeft, LogicalKeyboardKey.arrowLeft]);
     });
@@ -47,8 +73,6 @@ void main() {
 
       await harness.send('started', x: 500, y: 500);
       await harness.send('move', x: 380, y: 500);
-
-      harness.advance(const Duration(milliseconds: 141));
       await harness.send('move', x: 260, y: 370);
 
       expect(harness.keys, [LogicalKeyboardKey.arrowLeft, LogicalKeyboardKey.arrowLeft]);
@@ -59,8 +83,6 @@ void main() {
 
       await harness.send('started', x: 500, y: 500);
       await harness.send('move', x: 380, y: 500);
-
-      harness.advance(const Duration(milliseconds: 141));
       await harness.send('move', x: 500, y: 370);
 
       expect(harness.keys, [LogicalKeyboardKey.arrowLeft, LogicalKeyboardKey.arrowRight]);
@@ -71,8 +93,6 @@ void main() {
 
       await harness.send('started', x: 500, y: 500);
       await harness.send('move', x: 380, y: 500);
-
-      harness.advance(const Duration(milliseconds: 141));
       await harness.send('move', x: 380, y: 300);
 
       expect(harness.keys, [LogicalKeyboardKey.arrowLeft, LogicalKeyboardKey.arrowUp]);

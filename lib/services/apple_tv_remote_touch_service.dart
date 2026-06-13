@@ -21,9 +21,22 @@ class AppleTvRemotePlayPauseAction {
 /// focus-tree key events Plezy already handles for D-pad navigation.
 class AppleTvRemoteTouchService {
   static const String _channelName = 'flutter/gamepadtouchevent';
-  static const double defaultSwipeThreshold = 180;
+  // Touch coordinates arrive in screen-pixel space (~1920×1080) and every
+  // gesture is reported starting from the touchpad center, so a move's delta is
+  // the finger's displacement-from-center in pixels (a full half-trackpad swipe
+  // spans ~900px). The flutter-tvos reference implementation uses ~400px as the
+  // swipe distance; the original 180 here was <20% of a half-swipe, which made
+  // casual flicks over-trigger.
+  static const double defaultSwipeThreshold = 400;
   static const double defaultAxisSwitchDominanceRatio = 1.5;
-  static const Duration defaultSwipeRepeatInterval = Duration(milliseconds: 140);
+  // Minimum finger speed (touch-surface points per second) required to move
+  // focus more than once within a single swipe. The first move of a gesture is
+  // always allowed (precision); subsequent moves only fire while the finger
+  // keeps flicking above this speed — so a slow, deliberate swipe moves one
+  // item while a fast flick coasts across several, matching the tvOS focus
+  // engine. Tune against the `suppress swipe reason=below-flick-velocity` /
+  // `emit key=... v=` logs on-device.
+  static const double defaultFlickVelocity = 2000;
   static const Duration defaultClickAfterDirectionSuppression = Duration(milliseconds: 220);
 
   static final AppleTvRemoteTouchService instance = AppleTvRemoteTouchService();
@@ -39,7 +52,7 @@ class AppleTvRemoteTouchService {
       StreamController<AppleTvRemotePlayPauseAction>.broadcast();
   final double swipeThreshold;
   final double axisSwitchDominanceRatio;
-  final Duration swipeRepeatInterval;
+  final double flickVelocity;
   final Duration clickAfterDirectionSuppression;
 
   bool _listening = false;
@@ -52,6 +65,10 @@ class AppleTvRemoteTouchService {
   double _anchorY = 0;
   _SwipeAxis? _lastSwipeAxis;
   DateTime? _lastSwipeAt;
+  // Time the current swipe segment's anchor was last set (gesture start, last
+  // emitted move, or a suppressed slow segment). Used to measure per-segment
+  // finger velocity so fast flicks move several items while slow swipes move one.
+  DateTime _anchorAt = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime? _lastDirectionalInputAt;
   DateTime? _lastSyntheticSelectAt;
   DateTime? _lastAcceptedNativeSelectDownAt;
@@ -71,7 +88,7 @@ class AppleTvRemoteTouchService {
     Duration duplicateSuppressionWindow = GamepadDuplicateInputGuard.defaultSuppressionWindow,
     this.swipeThreshold = defaultSwipeThreshold,
     this.axisSwitchDominanceRatio = defaultAxisSwitchDominanceRatio,
-    this.swipeRepeatInterval = defaultSwipeRepeatInterval,
+    this.flickVelocity = defaultFlickVelocity,
     this.clickAfterDirectionSuppression = defaultClickAfterDirectionSuppression,
   }) : assert(axisSwitchDominanceRatio >= 1),
        _channel = channel ?? const BasicMessageChannel<dynamic>(_channelName, JSONMessageCodec()),
@@ -196,6 +213,7 @@ class AppleTvRemoteTouchService {
     _anchorY = y;
     _lastSwipeAxis = null;
     _lastSwipeAt = null;
+    _anchorAt = _now();
   }
 
   void _moveTouch(double x, double y) {
@@ -210,13 +228,26 @@ class AppleTvRemoteTouchService {
     if (axis == null) return;
 
     final now = _now();
-    final lastSwipeAt = _lastSwipeAt;
-    if (lastSwipeAt != null && now.difference(lastSwipeAt) < swipeRepeatInterval) {
-      final age = now.difference(lastSwipeAt).inMilliseconds;
-      _log(
-        'suppress swipe reason=repeat-cooldown age=${age}ms dx=${_formatDouble(deltaX)} dy=${_formatDouble(deltaY)}',
-      );
-      return;
+    // The first move of a gesture always fires (precision). Subsequent moves
+    // only fire while the finger keeps flicking fast: a slow, deliberate swipe
+    // moves one item; a quick flick coasts across several. Mirrors the tvOS
+    // focus engine's velocity-sensitive navigation.
+    if (_lastSwipeAt != null) {
+      final segmentDistance = axis == _SwipeAxis.horizontal ? deltaX.abs() : deltaY.abs();
+      final dtSeconds = now.difference(_anchorAt).inMicroseconds / Duration.microsecondsPerSecond;
+      final velocity = dtSeconds > 0 ? segmentDistance / dtSeconds : double.infinity;
+      if (velocity < flickVelocity) {
+        _log(
+          'suppress swipe reason=below-flick-velocity v=${_formatDouble(velocity)} '
+          'dx=${_formatDouble(deltaX)} dy=${_formatDouble(deltaY)}',
+        );
+        // Re-anchor so the next segment is measured fresh — a late flick after
+        // a slow drag should still register a move.
+        _anchorX = x;
+        _anchorY = y;
+        _anchorAt = now;
+        return;
+      }
     }
 
     final logicalKey = axis == _SwipeAxis.horizontal
@@ -226,6 +257,7 @@ class AppleTvRemoteTouchService {
     _emitKey(logicalKey, source: 'swipe', detail: 'dx=${_formatDouble(deltaX)} dy=${_formatDouble(deltaY)}');
     _anchorX = x;
     _anchorY = y;
+    _anchorAt = now;
     _lastSwipeAxis = axis;
     _lastSwipeAt = now;
   }
