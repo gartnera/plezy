@@ -390,4 +390,28 @@ class PlayerNative extends PlayerBase {
     if (!Platform.isAndroid || disposed || !initialized) return;
     await invoke('abandonAudioFocus');
   }
+
+  @override
+  Future<void> dispose({bool preserveDisplayMode = false}) async {
+    if (disposed) return;
+    // HACK: remove once ao_avfoundation tears the spdif renderer down safely.
+    // iOS/tvOS AC3/EAC3 passthrough streams through ao_avfoundation's
+    // AVSampleBufferAudioRenderer, whose requestMediaDataWhenReady feed block
+    // (running on the "avfoundation event" queue) reads the renderer's
+    // AVSampleBufferRenderSynchronizer via -currentTime. The abrupt
+    // mpv_terminate_destroy in native dispose can free the synchronizer while
+    // that block is still in flight, crashing with EXC_BAD_ACCESS. Clearing
+    // audio-spdif first reloads the AO back to the PCM (audiounit) path and
+    // lets the in-flight feed block drain before the engine is torn down.
+    // This narrows the teardown race; the real fix belongs in ao_avfoundation.
+    if (Platform.isIOS && _passthroughActive) {
+      try {
+        await _applyPassthrough(false);
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+      } catch (_) {
+        // Best-effort: never block teardown on the passthrough wind-down.
+      }
+    }
+    await super.dispose(preserveDisplayMode: preserveDisplayMode);
+  }
 }
