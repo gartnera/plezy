@@ -183,6 +183,13 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
   LogicalKeyboardKey? _seekDirection; // Current direction being held
   int _seekRepeatCount = 0; // Consecutive key repeats for acceleration
 
+  // Last position issued via a key-driven timeline seek. Non-null while such a
+  // seek is in flight: onSeek takes the scrub chrome hold on every press, and
+  // only onSeekEnd releases it. The keyboard/dpad path has no gesture onEnd, so
+  // we finalize through this on key release / focus loss — otherwise the hold
+  // leaks and pins the controls visible, blocking the back/menu key (#1330).
+  Duration? _pendingKeySeekPosition;
+
   // Preview thumbnail during sustained dpad/keyboard seeking
   bool _showKeyRepeatThumbnail = false;
   Timer? _keyRepeatThumbnailTimer;
@@ -454,6 +461,14 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
     if (_showKeyRepeatThumbnail) {
       setState(() => _showKeyRepeatThumbnail = false);
     }
+    // Finalize any in-flight key-driven seek so the scrub hold taken by onSeek
+    // is released (mirrors the drag gesture's onEnd → onSeekEnd). Guarded so
+    // non-seek resets (e.g. focus gain, UP/DOWN nav) don't issue stray seeks.
+    final pendingSeek = _pendingKeySeekPosition;
+    if (pendingSeek != null) {
+      _pendingKeySeekPosition = null;
+      widget.onSeekEnd(pendingSeek);
+    }
   }
 
   /// Show the timeline preview thumbnail during sustained key-repeat seeking.
@@ -557,6 +572,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
       final clampedPosition = Duration(milliseconds: newPosition.inMilliseconds.clamp(0, duration.inMilliseconds));
 
       widget.onSeek(clampedPosition);
+      _pendingKeySeekPosition = clampedPosition;
       widget.onFocusActivity?.call();
       return KeyEventResult.handled;
     }
